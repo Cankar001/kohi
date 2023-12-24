@@ -14,8 +14,9 @@
 
 #pragma once
 
+#include "audio/audio_types.h"
 #include "defines.h"
-#include "renderer/renderer_types.inl"
+#include "renderer/renderer_types.h"
 #include "systems/font_system.h"
 
 struct application;
@@ -48,6 +49,7 @@ typedef struct application_config {
     render_view* views;
 
     renderer_plugin renderer_plugin;
+    audio_plugin audio_plugin;
 
     /** @brief The size of the frame allocator. */
     u64 frame_allocator_size;

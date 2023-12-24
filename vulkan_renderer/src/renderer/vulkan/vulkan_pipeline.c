@@ -1,12 +1,14 @@
 #include "vulkan_pipeline.h"
 
+#include <containers/darray.h>
 #include <vulkan/vulkan_core.h>
 
 #include "core/kmemory.h"
 #include "core/kstring.h"
 #include "core/logger.h"
 #include "math/math_types.h"
-#include "renderer/vulkan/vulkan_types.inl"
+#include "renderer/renderer_types.h"
+#include "renderer/vulkan/vulkan_types.h"
 #include "resources/resource_types.h"
 #include "systems/shader_system.h"
 #include "vulkan_utils.h"
@@ -23,7 +25,7 @@ b8 vulkan_graphics_pipeline_create(vulkan_context* context, const vulkan_pipelin
     VkPipelineRasterizationStateCreateInfo rasterizer_create_info = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rasterizer_create_info.depthClampEnable = VK_FALSE;
     rasterizer_create_info.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer_create_info.polygonMode = config->is_wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+    rasterizer_create_info.polygonMode = (config->shader_flags & SHADER_FLAG_WIREFRAME) ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
     rasterizer_create_info.lineWidth = 1.0f;
     switch (config->cull_mode) {
         case FACE_CULL_MODE_NONE:
@@ -40,7 +42,15 @@ b8 vulkan_graphics_pipeline_create(vulkan_context* context, const vulkan_pipelin
             rasterizer_create_info.cullMode = VK_CULL_MODE_FRONT_AND_BACK;
             break;
     }
-    rasterizer_create_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    if (config->winding == RENDERER_WINDING_CLOCKWISE) {
+        rasterizer_create_info.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    } else if (config->winding == RENDERER_WINDING_COUNTER_CLOCKWISE) {
+        rasterizer_create_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    } else {
+        KWARN("Invalid front-face winding order specified, default to counter-clockwise");
+        rasterizer_create_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    }
     rasterizer_create_info.depthBiasEnable = VK_FALSE;
     rasterizer_create_info.depthBiasConstantFactor = 0.0f;
     rasterizer_create_info.depthBiasClamp = 0.0f;
@@ -95,14 +105,20 @@ b8 vulkan_graphics_pipeline_create(vulkan_context* context, const vulkan_pipelin
     color_blend_state_create_info.pAttachments = &color_blend_attachment_state;
 
     // Dynamic state
-    const u32 dynamic_state_count = 3;
-    VkDynamicState dynamic_states[3] = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR,
-        VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY};
+    VkDynamicState* dynamic_states = darray_create(VkDynamicState);
+    darray_push(dynamic_states, VK_DYNAMIC_STATE_VIEWPORT);
+    darray_push(dynamic_states, VK_DYNAMIC_STATE_SCISSOR);
+    // Primitive topology, if supported.
+    if ((context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_TOPOLOGY_BIT) || (context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_TOPOLOGY_BIT)) {
+        darray_push(dynamic_states, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY);
+    }
+    // Front-face, if supported.
+    if ((context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_FRONT_FACE_BIT) || (context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_FRONT_FACE_BIT)) {
+        darray_push(dynamic_states, VK_DYNAMIC_STATE_FRONT_FACE);
+    }
 
     VkPipelineDynamicStateCreateInfo dynamic_state_create_info = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamic_state_create_info.dynamicStateCount = dynamic_state_count;
+    dynamic_state_create_info.dynamicStateCount = darray_length(dynamic_states);
     dynamic_state_create_info.pDynamicStates = dynamic_states;
 
     // Vertex input
@@ -223,6 +239,9 @@ b8 vulkan_graphics_pipeline_create(vulkan_context* context, const vulkan_pipelin
         &pipeline_create_info,
         context->allocator,
         &out_pipeline->handle);
+
+    // Cleanup
+    darray_destroy(dynamic_states);
 
     char pipeline_name_buf[512] = {0};
     string_format(pipeline_name_buf, "pipeline_shader_%s", config->name);

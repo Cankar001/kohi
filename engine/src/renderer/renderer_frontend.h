@@ -13,11 +13,12 @@
 
 #pragma once
 
-#include "renderer_types.inl"
+#include "renderer_types.h"
 
 struct shader;
 struct shader_uniform;
 struct frame_data;
+struct viewport;
 
 typedef struct renderer_system_config {
     char* application_name;
@@ -52,13 +53,38 @@ KAPI void renderer_system_shutdown(void* state);
 KAPI void renderer_on_resized(u16 width, u16 height);
 
 /**
- * @brief Draws the next frame using the data provided in the render packet.
+ * @brief Performs setup routines required at the start of a frame.
+ * @note A false result does not necessarily indicate failure. It can also specify that
+ * the backend is simply not in a state capable of drawing a frame at the moment, and
+ * that it should be attempted again on the next loop. End frame does not need to (and
+ * should not) be called if this is the case.
+ * @param p_frame_data A pointer to the current frame's data.
+ * @return True if successful; otherwise false.
+ */
+KAPI b8 renderer_frame_prepare(struct frame_data* p_frame_data);
+
+/**
+ * @brief Begins a render. There must be at least one of these and a matching end per frame.
+ * @param p_frame_data A pointer to the current frame's data.
+ * @return True if successful; otherwise false.
+ */
+KAPI b8 renderer_begin(struct frame_data* p_frame_data);
+
+/**
+ * @brief Ends a render.
+ * @param p_frame_data A pointer to the current frame's data.
+ * @return True if successful; otherwise false.
+ */
+KAPI b8 renderer_end(struct frame_data* p_frame_data);
+
+/**
+ * @brief Performs routines required to draw a frame, such as presentation. Should only be called
+ * after a successful return of begin_frame.
  *
- * @param packet A pointer to the render packet, which contains data on what should be rendered.
  * @param p_frame_data A constant pointer to the current frame's data.
  * @return True on success; otherwise false.
  */
-KAPI b8 renderer_draw_frame(render_packet* packet, const struct frame_data* p_frame_data);
+KAPI b8 renderer_present(struct frame_data* p_frame_data);
 
 /**
  * @brief Sets the renderer viewport to the given rectangle. Must be done within a renderpass.
@@ -85,6 +111,13 @@ KAPI void renderer_scissor_set(vec4 rect);
  * Must be done within a renderpass.
  */
 KAPI void renderer_scissor_reset(void);
+
+/**
+ * @brief Set the renderer to use the given winding direction.
+ *
+ * @param winding The winding direction.
+ */
+KAPI void renderer_winding_set(renderer_winding winding);
 
 /**
  * @brief Creates a new texture.
@@ -419,11 +452,11 @@ KAPI void renderer_flag_enabled_set(renderer_config_flags flag, b8 enabled);
  * @param name The name of the renderbuffer, used for debugging purposes.
  * @param type The type of buffer, indicating it's use (i.e. vertex/index data, uniforms, etc.)
  * @param total_size The total size in bytes of the buffer.
- * @param use_freelist Indicates if the buffer should use a freelist to track allocations.
+ * @param track_type Indicates what type of allocation tracking should be used.
  * @param out_buffer A pointer to hold the newly created buffer.
  * @return True on success; otherwise false.
  */
-KAPI b8 renderer_renderbuffer_create(const char* name, renderbuffer_type type, u64 total_size, b8 use_freelist, renderbuffer* out_buffer);
+KAPI b8 renderer_renderbuffer_create(const char* name, renderbuffer_type type, u64 total_size, renderbuffer_track_type track_type, renderbuffer* out_buffer);
 
 /**
  * @brief Destroys the given renderbuffer.
@@ -520,6 +553,15 @@ KAPI b8 renderer_renderbuffer_allocate(renderbuffer* buffer, u64 size, u64* out_
 KAPI b8 renderer_renderbuffer_free(renderbuffer* buffer, u64 size, u64 offset);
 
 /**
+ * @brief Clears the given buffer. Internally, resets the free list if one is used.
+ *
+ * @param buffer A pointer to the buffer to be freed from.
+ * @param zero_memory True if memory should be zeroed; otherwise false. NOTE: this can be an expensive operation on large sums of memory.
+ * @return True on success; otherwise false.
+ */
+KAPI b8 renderer_renderbuffer_clear(renderbuffer* buffer, b8 zero_memory);
+
+/**
  * @brief Loads provided data into the specified rage of the given buffer.
  *
  * @param buffer A pointer to the buffer to load data into.
@@ -553,3 +595,15 @@ KAPI b8 renderer_renderbuffer_copy_range(renderbuffer* source, u64 source_offset
  * @return True on success; otherwise false.
  */
 KAPI b8 renderer_renderbuffer_draw(renderbuffer* buffer, u64 offset, u32 element_count, b8 bind_only);
+
+/**
+ * @brief Returns a pointer to the currently active viewport.
+ */
+KAPI struct viewport* renderer_active_viewport_get(void);
+
+/**
+ * @brief Sets the currently active viewport.
+ *
+ * @param viewport A pointer to the viewport to be set.
+ */
+KAPI void renderer_active_viewport_set(struct viewport* v);

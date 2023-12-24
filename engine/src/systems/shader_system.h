@@ -15,7 +15,7 @@
 
 #include "containers/hashtable.h"
 #include "defines.h"
-#include "renderer/renderer_types.inl"
+#include "renderer/renderer_types.h"
 
 /** @brief Configuration for the shader system. */
 typedef struct shader_system_config {
@@ -79,7 +79,8 @@ typedef struct shader_attribute {
 typedef enum shader_flags {
     SHADER_FLAG_NONE = 0x0,
     SHADER_FLAG_DEPTH_TEST = 0x1,
-    SHADER_FLAG_DEPTH_WRITE = 0x2
+    SHADER_FLAG_DEPTH_WRITE = 0x2,
+    SHADER_FLAG_WIREFRAME = 0x4
 } shader_flags;
 
 typedef u32 shader_flag_bits;
@@ -163,8 +164,10 @@ typedef struct shader {
     /** @brief The size of all attributes combined, a.k.a. the size of a vertex. */
     u16 attribute_stride;
 
-    /** @brief aUsed to ensure the shader's globals are only updated once per frame. */
+    /** @brief Used to ensure the shader's globals are only updated once per frame. */
     u64 render_frame_number;
+    /** @brief Used to ensure the shader's globals are only updated once per draw. */
+    u8 draw_index;
 
     /** @brief An opaque pointer to hold renderer API specific data. Renderer is responsible for creation and destruction of this.  */
     void* internal_data;

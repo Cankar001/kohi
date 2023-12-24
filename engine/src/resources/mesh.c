@@ -5,7 +5,7 @@
 #include "core/kstring.h"
 #include "core/logger.h"
 #include "math/math_types.h"
-#include "renderer/renderer_types.inl"
+#include "renderer/renderer_types.h"
 #include "systems/geometry_system.h"
 #include "systems/job_system.h"
 #include "systems/resource_system.h"
@@ -175,7 +175,7 @@ b8 mesh_load(mesh* m) {
         return false;
     }
 
-    m->unique_id = identifier_aquire_new_id(m);
+    m->id = identifier_create();
 
     if (m->config.resource_name) {
         return mesh_load_from_resource(m->config.resource_name, m);

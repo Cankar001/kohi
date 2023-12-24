@@ -11,7 +11,8 @@
 #include "math/kmath.h"
 #include "math/transform.h"
 #include "renderer/camera.h"
-#include "renderer/renderer_types.inl"
+#include "renderer/renderer_types.h"
+#include "renderer/viewport.h"
 #include "resources/debug/debug_box3d.h"
 #include "resources/debug/debug_line3d.h"
 #include "resources/mesh.h"
@@ -19,7 +20,6 @@
 #include "resources/skybox.h"
 #include "resources/terrain.h"
 #include "systems/light_system.h"
-#include "systems/render_view_system.h"
 #include "systems/resource_system.h"
 
 static void
@@ -57,12 +57,6 @@ b8 simple_scene_create(void *config, simple_scene *out_scene) {
         out_scene->config = kallocate(sizeof(simple_scene_config), MEMORY_TAG_SCENE);
         kcopy_memory(out_scene->config, config, sizeof(simple_scene_config));
     }
-
-    // NOTE: Starting with a reasonably high number to avoid reallocs in the
-    // beginning.
-    out_scene->world_data.world_geometries = darray_reserve(geometry_render_data, 512);
-    out_scene->world_data.terrain_geometries = darray_create(geometry_render_data);
-    out_scene->world_data.debug_geometries = darray_create(geometry_render_data);
 
     debug_grid_config grid_config = {0};
     grid_config.orientation = DEBUG_GRID_ORIENTATION_XZ;
@@ -406,6 +400,11 @@ b8 simple_scene_update(simple_scene *scene,
         return false;
     }
 
+    if (scene->state == SIMPLE_SCENE_STATE_UNLOADING) {
+        simple_scene_actual_unload(scene);
+        return true;
+    }
+
     if (scene->state >= SIMPLE_SCENE_STATE_LOADED) {
         // TODO: Update directional light, if changed.
         if (scene->dir_light && scene->dir_light->debug_data) {
@@ -472,29 +471,14 @@ b8 simple_scene_update(simple_scene *scene,
         }
     }
 
-    if (scene->state == SIMPLE_SCENE_STATE_UNLOADING) {
-        simple_scene_actual_unload(scene);
-    }
+    
 
     return true;
 }
 
-b8 simple_scene_populate_render_packet(simple_scene *scene, struct camera *current_camera, f32 aspect, struct frame_data *p_frame_data, struct render_packet *packet) {
-    if (!scene || !packet) {
+b8 simple_scene_populate_render_packet(simple_scene *scene, struct camera *current_camera, viewport *v, struct frame_data *p_frame_data, struct render_packet *packet) {
+    /* if (!scene || !packet) {
         return false;
-    }
-
-    // Skybox
-    if (scene->sb) {
-        render_view_packet *view_packet = &packet->views[TESTBED_PACKET_VIEW_SKYBOX];
-        const render_view *view = view_packet->view;
-        // Skybox
-        skybox_packet_data skybox_data = {};
-        skybox_data.sb = scene->sb;
-        if (!render_view_system_packet_build(view, p_frame_data->frame_allocator, &skybox_data, view_packet)) {
-            KERROR("Failed to build packet for view 'skybox'.");
-            return false;
-        }
     }
 
     // World render
@@ -506,13 +490,15 @@ b8 simple_scene_populate_render_packet(simple_scene *scene, struct camera *curre
         darray_clear(scene->world_data.terrain_geometries);
         darray_clear(scene->world_data.debug_geometries);
 
+        // Skybox
+        scene->world_data.skybox_data.sb = scene->sb;
+
         // Update the frustum
         vec3 forward = camera_forward(current_camera);
         vec3 right = camera_right(current_camera);
         vec3 up = camera_up(current_camera);
-        // TODO: get camera fov, aspect, etc.
         frustum f = frustum_create(&current_camera->position, &forward, &right,
-                                   &up, aspect, deg_to_rad(45.0f), 0.1f, 1000.0f);
+                                   &up, v->rect.width / v->rect.height, v->fov, v->near_clip, v->far_clip);
 
         p_frame_data->drawn_mesh_count = 0;
 
@@ -521,6 +507,7 @@ b8 simple_scene_populate_render_packet(simple_scene *scene, struct camera *curre
             mesh *m = &scene->meshes[i];
             if (m->generation != INVALID_ID_U8) {
                 mat4 model = transform_world_get(&m->transform);
+                b8 winding_inverted = m->transform.determinant < 0;
 
                 for (u32 j = 0; j < m->geometry_count; ++j) {
                     geometry *g = m->geometries[j];
@@ -573,6 +560,7 @@ b8 simple_scene_populate_render_packet(simple_scene *scene, struct camera *curre
                             data.model = model;
                             data.geometry = g;
                             data.unique_id = m->unique_id;
+                            data.winding_inverted = winding_inverted;
                             darray_push(scene->world_data.world_geometries, data);
 
                             p_frame_data->drawn_mesh_count++;
@@ -659,12 +647,12 @@ b8 simple_scene_populate_render_packet(simple_scene *scene, struct camera *curre
         }
 
         // World
-        if (!render_view_system_packet_build(view, p_frame_data->frame_allocator, &scene->world_data, view_packet)) {
+        if (!render_view_system_packet_build(view, p_frame_data, v, current_camera, &scene->world_data, view_packet)) {
             KERROR("Failed to build packet for view 'world'.");
             return false;
         }
     }
-
+*/
     return true;
 }
 
@@ -684,7 +672,7 @@ b8 simple_scene_raycast(simple_scene *scene, const struct ray *r, struct raycast
         mesh *m = &scene->meshes[i];
         mat4 model = transform_world_get(&m->transform);
         f32 dist;
-        if (raycast_oriented_extents(m->extents, &model, r, &dist)) {
+        if (raycast_oriented_extents(m->extents, model, r, &dist)) {
             // Hit
             if (!out_result->hits) {
                 out_result->hits = darray_create(raycast_hit);
@@ -694,9 +682,29 @@ b8 simple_scene_raycast(simple_scene *scene, const struct ray *r, struct raycast
             hit.distance = dist;
             hit.type = RAYCAST_HIT_TYPE_OBB;
             hit.position = vec3_add(r->origin, vec3_mul_scalar(r->direction, hit.distance));
-            hit.unique_id = m->unique_id;
+            hit.unique_id = m->id.uniqueid;
 
             darray_push(out_result->hits, hit);
+        }
+    }
+
+    // Sort the results based on distance.
+    if (out_result->hits) {
+        b8 swapped;
+        u32 length = darray_length(out_result->hits);
+        for (u32 i = 0; i < length - 1; ++i) {
+            swapped = false;
+            for (u32 j = 0; j < length - 1; ++j) {
+                if (out_result->hits[j].distance > out_result->hits[j + 1].distance) {
+                    KSWAP(raycast_hit, out_result->hits[j], out_result->hits[j + 1]);
+                    swapped = true;
+                }
+            }
+
+            // If no 2 elements were swapped, then sort is complete.
+            if (!swapped) {
+                break;
+            }
         }
     }
     return out_result->hits != 0;
@@ -1094,6 +1102,89 @@ struct terrain *simple_scene_terrain_get(simple_scene *scene,
     return 0;
 }
 
+b8 simple_scene_debug_render_data_query(simple_scene *scene, u32 *data_count, geometry_render_data **debug_geometries) {
+    if (!scene || !data_count) {
+        return false;
+    }
+
+    *data_count = 0;
+
+    // TODO: Check if grid exists.
+    {
+        if (debug_geometries) {
+            geometry_render_data data = {0};
+            data.model = mat4_identity();
+            data.geometry = &scene->grid.geo;
+            data.unique_id = INVALID_ID;
+
+            (*debug_geometries)[(*data_count)] = data;
+        }
+        (*data_count)++;
+    }
+
+    // Directional light.
+    {
+        if (scene->dir_light && scene->dir_light->debug_data) {
+            if (debug_geometries) {
+                simple_scene_debug_data *debug = scene->dir_light->debug_data;
+
+                // Debug line 3d
+                geometry_render_data data = {0};
+                data.model = transform_world_get(&debug->line.xform);
+                data.geometry = &debug->line.geo;
+                data.unique_id = debug->line.id.uniqueid;
+
+                (*debug_geometries)[(*data_count)] = data;
+            }
+            (*data_count)++;
+        }
+    }
+
+    // Point lights
+    {
+        u32 point_light_count = darray_length(scene->point_lights);
+        for (u32 i = 0; i < point_light_count; ++i) {
+            if (scene->point_lights[i].debug_data) {
+                if (debug_geometries) {
+                    simple_scene_debug_data *debug = (simple_scene_debug_data *)scene->point_lights[i].debug_data;
+
+                    // Debug box 3d
+                    geometry_render_data data = {0};
+                    data.model = transform_world_get(&debug->box.xform);
+                    data.geometry = &debug->box.geo;
+                    data.unique_id = debug->box.id.uniqueid;
+
+                    (*debug_geometries)[(*data_count)] = data;
+                }
+                (*data_count)++;
+            }
+        }
+    }
+
+    // Mesh debug shapes
+    {
+        u32 mesh_count = darray_length(scene->meshes);
+        for (u32 i = 0; i < mesh_count; ++i) {
+            if (scene->meshes[i].debug_data) {
+                if (debug_geometries) {
+                    simple_scene_debug_data *debug = (simple_scene_debug_data *)scene->meshes[i].debug_data;
+
+                    // Debug box 3d
+                    geometry_render_data data = {0};
+                    data.model = transform_world_get(&debug->box.xform);
+                    data.geometry = &debug->box.geo;
+                    data.unique_id = debug->box.id.uniqueid;
+
+                    (*debug_geometries)[(*data_count)] = data;
+                }
+                (*data_count)++;
+            }
+        }
+    }
+
+    return true;
+}
+
 static void simple_scene_actual_unload(simple_scene *scene) {
     if (scene->sb) {
         if (!skybox_unload(scene->sb)) {
@@ -1188,17 +1279,27 @@ static void simple_scene_actual_unload(simple_scene *scene) {
         darray_destroy(scene->terrains);
     }
 
-    if (scene->world_data.world_geometries) {
-        darray_destroy(scene->world_data.world_geometries);
-    }
-
-    if (scene->world_data.terrain_geometries) {
-        darray_destroy(scene->world_data.terrain_geometries);
-    }
-
-    if (scene->world_data.debug_geometries) {
-        darray_destroy(scene->world_data.debug_geometries);
-    }
-
     kzero_memory(scene, sizeof(simple_scene));
+}
+
+struct transform *simple_scene_transform_get_by_id(simple_scene *scene, u64 unique_id) {
+    if (!scene) {
+        return 0;
+    }
+
+    u32 mesh_count = darray_length(scene->meshes);
+    for (u32 i = 0; i < mesh_count; ++i) {
+        if (scene->meshes[i].id.uniqueid == unique_id) {
+            return &scene->meshes[i].transform;
+        }
+    }
+
+    u32 terrain_count = darray_length(scene->terrains);
+    for (u32 i = 0; i < terrain_count; ++i) {
+        if (scene->terrains[i].id.uniqueid == unique_id) {
+            return &scene->terrains[i].xform;
+        }
+    }
+
+    return 0;
 }

@@ -12,15 +12,18 @@
 #include "core/kvar.h"
 #include "platform/platform.h"
 #include "renderer/renderer_frontend.h"
+#include "systems/audio_system.h"
 #include "systems/camera_system.h"
 #include "systems/geometry_system.h"
 #include "systems/job_system.h"
 #include "systems/light_system.h"
 #include "systems/material_system.h"
-#include "systems/render_view_system.h"
 #include "systems/resource_system.h"
 #include "systems/shader_system.h"
 #include "systems/texture_system.h"
+
+// Version reporting.
+#include "version.h"
 
 static b8 register_known_systems_pre_boot(systems_manager_state* state, application_config* app_config);
 static b8 register_known_systems_post_boot(systems_manager_state* state, application_config* app_config);
@@ -47,7 +50,7 @@ void systems_manager_shutdown(systems_manager_state* state) {
     shutdown_known_systems(state);
 }
 
-b8 systems_manager_update(systems_manager_state* state, const struct frame_data* p_frame_data) {
+b8 systems_manager_update(systems_manager_state* state, struct frame_data* p_frame_data) {
     for (u32 i = 0; i < K_SYSTEM_TYPE_MAX_COUNT; ++i) {
         k_system* s = &state->systems[i];
         if (s->update) {
@@ -134,6 +137,14 @@ static b8 register_known_systems_pre_boot(systems_manager_state* state, applicat
         KERROR("Failed to register logging system.");
         return false;
     }
+
+    // Report engine version
+#if KRELEASE
+    const char* build_type = "Release";
+#else
+    const char* build_type = "Debug";
+#endif
+    KINFO("Kohi Engine v. %s (%s)", KVERSION, build_type);
 
     // Input
     if (!systems_manager_register(state, K_SYSTEM_TYPE_INPUT, input_system_initialize, input_system_shutdown, 0, 0)) {
@@ -228,6 +239,15 @@ static b8 register_known_systems_pre_boot(systems_manager_state* state, applicat
         return false;
     }
 
+    // Audio system
+    audio_system_config audio_sys_config = {0};
+    audio_sys_config.plugin = app_config->audio_plugin;
+    audio_sys_config.audio_channel_count = 8;
+    if (!systems_manager_register(state, K_SYSTEM_TYPE_AUDIO, audio_system_initialize, audio_system_shutdown, audio_system_update, &audio_sys_config)) {
+        KERROR("Failed to register audio system.");
+        return false;
+    }
+
     return true;
 }
 
@@ -235,11 +255,11 @@ static void shutdown_known_systems(systems_manager_state* state) {
     state->systems[K_SYSTEM_TYPE_CAMERA].shutdown(state->systems[K_SYSTEM_TYPE_CAMERA].state);
     state->systems[K_SYSTEM_TYPE_FONT].shutdown(state->systems[K_SYSTEM_TYPE_FONT].state);
 
-    state->systems[K_SYSTEM_TYPE_RENDER_VIEW].shutdown(state->systems[K_SYSTEM_TYPE_RENDER_VIEW].state);
     state->systems[K_SYSTEM_TYPE_GEOMETRY].shutdown(state->systems[K_SYSTEM_TYPE_GEOMETRY].state);
     state->systems[K_SYSTEM_TYPE_MATERIAL].shutdown(state->systems[K_SYSTEM_TYPE_MATERIAL].state);
     state->systems[K_SYSTEM_TYPE_TEXTURE].shutdown(state->systems[K_SYSTEM_TYPE_TEXTURE].state);
 
+    state->systems[K_SYSTEM_TYPE_AUDIO].shutdown(state->systems[K_SYSTEM_TYPE_AUDIO].state);
     state->systems[K_SYSTEM_TYPE_JOB].shutdown(state->systems[K_SYSTEM_TYPE_JOB].state);
     state->systems[K_SYSTEM_TYPE_SHADER].shutdown(state->systems[K_SYSTEM_TYPE_SHADER].state);
     state->systems[K_SYSTEM_TYPE_RENDERER].shutdown(state->systems[K_SYSTEM_TYPE_RENDERER].state);
@@ -276,23 +296,6 @@ static b8 register_known_systems_post_boot(systems_manager_state* state, applica
     if (!systems_manager_register(state, K_SYSTEM_TYPE_CAMERA, camera_system_initialize, camera_system_shutdown, 0, &camera_sys_config)) {
         KERROR("Failed to register camera system.");
         return false;
-    }
-
-    render_view_system_config render_view_sys_config = {};
-    render_view_sys_config.max_view_count = 251;
-    if (!systems_manager_register(state, K_SYSTEM_TYPE_RENDER_VIEW, render_view_system_initialize, render_view_system_shutdown, 0, &render_view_sys_config)) {
-        KERROR("Failed to register render view system.");
-        return false;
-    }
-
-    // Load render views from app config.
-    u32 view_count = darray_length(app_config->views);
-    for (u32 v = 0; v < view_count; ++v) {
-        render_view* view = &app_config->views[v];
-        if (!render_view_system_register(view)) {
-            KFATAL("Failed to register view '%s'. Aborting application.", view->name);
-            return false;
-        }
     }
 
     // Material system.

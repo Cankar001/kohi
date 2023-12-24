@@ -17,7 +17,7 @@ typedef enum raycast_hit_type {
 
 typedef struct raycast_hit {
     raycast_hit_type type;
-    u32 unique_id;
+    u64 unique_id;
     vec3 position;
     f32 distance;
 } raycast_hit;
@@ -28,6 +28,11 @@ typedef struct raycast_result {
 } raycast_result;
 
 KAPI ray ray_create(vec3 position, vec3 direction);
-KAPI ray ray_from_screen(vec2 screen_pos, vec2 viewport_size, vec3 origin, mat4 view, mat4 projection);
+KAPI ray ray_from_screen(vec2 screen_pos, rect_2d viewport_rect, vec3 origin, mat4 view, mat4 projection);
 
-KAPI b8 raycast_oriented_extents(extents_3d bb_extents, const mat4* bb_model, const ray* r, f32* out_dist);
+KAPI b8 raycast_aabb(extents_3d bb_extents, const ray* r, vec3* out_point);
+KAPI b8 raycast_oriented_extents(extents_3d bb_extents, mat4 model, const ray* r, f32* out_dist);
+
+KAPI b8 raycast_plane_3d(const ray* r, const plane_3d* p, vec3* out_point, f32* out_distance);
+
+KAPI b8 raycast_disc_3d(const ray* r, vec3 center, vec3 normal, f32 outer_radius, f32 inner_radius, vec3* out_point, f32* out_distance);

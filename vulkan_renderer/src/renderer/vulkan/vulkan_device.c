@@ -4,7 +4,7 @@
 #include "core/kmemory.h"
 #include "core/kstring.h"
 #include "core/logger.h"
-#include "renderer/vulkan/vulkan_types.inl"
+#include "renderer/vulkan/vulkan_types.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan_utils.h"
 
@@ -45,6 +45,7 @@ b8 vulkan_device_create(vulkan_context* context) {
     // NOTE: Do not create additional queues for shared indices.
     b8 present_shares_graphics_queue = context->device.graphics_queue_index == context->device.present_queue_index;
     b8 transfer_shares_graphics_queue = context->device.graphics_queue_index == context->device.transfer_queue_index;
+    b8 present_must_share_graphics = false;
     u32 index_count = 1;
     if (!present_shares_graphics_queue) {
         index_count++;
@@ -52,7 +53,7 @@ b8 vulkan_device_create(vulkan_context* context) {
     if (!transfer_shares_graphics_queue) {
         index_count++;
     }
-    u32 indices[32];
+    i32 indices[32];
     u8 index = 0;
     indices[index++] = context->device.graphics_queue_index;
     if (!present_shares_graphics_queue) {
@@ -63,11 +64,28 @@ b8 vulkan_device_create(vulkan_context* context) {
     }
 
     VkDeviceQueueCreateInfo queue_create_infos[32];
-    f32 queue_priority = 1.0f;
+    f32 queue_priorities[2] = {0.9f, 1.0f};
+
+    VkQueueFamilyProperties props[32];
+    u32 prop_count;
+    vkGetPhysicalDeviceQueueFamilyProperties(context->device.physical_device, &prop_count, 0);
+    vkGetPhysicalDeviceQueueFamilyProperties(context->device.physical_device, &prop_count, props);
+
     for (u32 i = 0; i < index_count; ++i) {
         queue_create_infos[i].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queue_create_infos[i].queueFamilyIndex = indices[i];
         queue_create_infos[i].queueCount = 1;
+
+        if (present_shares_graphics_queue && indices[i] == context->device.present_queue_index) {
+            if (props[context->device.present_queue_index].queueCount > 1) {
+                // If the same family is shared between graphic and presentation,
+                // pull from the second index instead of the first for a unique queue.
+                queue_create_infos[i].queueCount = 2;
+            } else {
+                // Don't have available queues, just share them.
+                present_must_share_graphics = true;
+            }
+        }
 
         // TODO: Enable this for a future enhancement.
         // if (indices[i] == context->device.graphics_queue_index) {
@@ -75,13 +93,14 @@ b8 vulkan_device_create(vulkan_context* context) {
         // }
         queue_create_infos[i].flags = 0;
         queue_create_infos[i].pNext = 0;
-        queue_create_infos[i].pQueuePriorities = &queue_priority;
+        queue_create_infos[i].pQueuePriorities = queue_priorities;
     }
 
     // Request device features.
     // TODO: should be config driven
     VkPhysicalDeviceFeatures device_features = {};
     device_features.samplerAnisotropy = VK_TRUE;  // Request anistrophy
+    device_features.fillModeNonSolid = VK_TRUE;   // TODO: Check if supported?
 
     b8 portability_required = false;
     u32 available_extension_count = 0;
@@ -110,6 +129,8 @@ b8 vulkan_device_create(vulkan_context* context) {
         extension_names[ext_idx] = "VK_KHR_portability_subset";
         ext_idx++;
     }
+
+    b8 dynamic_state_extension_included = false;
     // If dynamic topology isn't supported natively but *is* supported via extension,
     // include the extension. These may both be false in the event of macos.
     if (
@@ -117,11 +138,23 @@ b8 vulkan_device_create(vulkan_context* context) {
         ((context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_TOPOLOGY_BIT) != 0)) {
         extension_names[ext_idx] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
         ext_idx++;
+        dynamic_state_extension_included = true;
     }
     // If smooth lines are supported, load the extension.
     if ((context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_LINE_SMOOTH_RASTERISATION_BIT)) {
         extension_names[ext_idx] = VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME;
         ext_idx++;
+    }
+    if (!dynamic_state_extension_included) {
+        // If dynamic front-face isn't supported natively but *is* supported via extension,
+        // include the extension. These may both be false in the event of macos.
+        if (
+            ((context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_FRONT_FACE_BIT) == 0) &&
+            ((context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_FRONT_FACE_BIT) != 0)) {
+            extension_names[ext_idx] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
+            ext_idx++;
+            dynamic_state_extension_included = true;
+        }
     }
     VkDeviceCreateInfo device_create_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_create_info.queueCreateInfoCount = index_count;
@@ -158,6 +191,7 @@ b8 vulkan_device_create(vulkan_context* context) {
 
     KINFO("Logical device created.");
 
+    // Examine dynamic topology support and load function pointer if need be.
     if (
         !(context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_TOPOLOGY_BIT) &&
         (context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_TOPOLOGY_BIT)) {
@@ -171,6 +205,20 @@ b8 vulkan_device_create(vulkan_context* context) {
         }
     }
 
+    // Examine dynamic front-face support and load function pointer if need be.
+    if (
+        !(context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_FRONT_FACE_BIT) &&
+        (context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_FRONT_FACE_BIT)) {
+        KINFO("Vulkan device doesn't support native dynamic front-face, but does via extension. Using extension.");
+        context->vkCmdSetFrontFaceEXT = (PFN_vkCmdSetFrontFaceEXT)vkGetInstanceProcAddr(context->instance, "vkCmdSetFrontFaceEXT");
+    } else {
+        if (context->device.support_flags & VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_FRONT_FACE_BIT) {
+            KINFO("Vulkan device supports native dynamic front-face.");
+        } else {
+            KINFO("Vulkan device does not support native or extension dynamic front-face.");
+        }
+    }
+
     // Get queues.
     vkGetDeviceQueue(
         context->device.logical_device,
@@ -181,7 +229,9 @@ b8 vulkan_device_create(vulkan_context* context) {
     vkGetDeviceQueue(
         context->device.logical_device,
         context->device.present_queue_index,
-        0,
+        // If the same family is shared between graphic and presentation,
+        // pull from the second index instead of the first for a unique queue.
+        present_must_share_graphics ? 0 : (context->device.graphics_queue_index == context->device.present_queue_index) ? 1                                                                                                                : 0,
         &context->device.present_queue);
 
     vkGetDeviceQueue(
@@ -363,8 +413,11 @@ static b8 select_physical_device(vulkan_context* context) {
     VkPhysicalDevice physical_devices[32];
     VK_CHECK(vkEnumeratePhysicalDevices(context->instance, &physical_device_count, physical_devices));
     for (u32 i = 0; i < physical_device_count; ++i) {
-        VkPhysicalDeviceProperties properties;
-        vkGetPhysicalDeviceProperties(physical_devices[i], &properties);
+        VkPhysicalDeviceProperties2 properties2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        VkPhysicalDeviceDriverProperties driverProperties = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        properties2.pNext = &driverProperties;
+        vkGetPhysicalDeviceProperties2(physical_devices[i], &properties2);
+        VkPhysicalDeviceProperties properties = properties2.properties;
 
         VkPhysicalDeviceFeatures features;
         vkGetPhysicalDeviceFeatures(physical_devices[i], &features);
@@ -428,11 +481,7 @@ static b8 select_physical_device(vulkan_context* context) {
                     break;
             }
 
-            KINFO(
-                "GPU Driver version: %d.%d.%d",
-                VK_VERSION_MAJOR(properties.driverVersion),
-                VK_VERSION_MINOR(properties.driverVersion),
-                VK_VERSION_PATCH(properties.driverVersion));
+            KINFO("GPU Driver version: %s", driverProperties.driverInfo);
 
             // Save off the device-supported API version.
             context->device.api_major = VK_VERSION_MAJOR(properties.apiVersion);
@@ -471,9 +520,11 @@ static b8 select_physical_device(vulkan_context* context) {
             // The device may or may not support this, so save that here.
             if (dynamic_state_next.extendedDynamicState) {
                 context->device.support_flags |= VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_TOPOLOGY_BIT;
+                context->device.support_flags |= VULKAN_DEVICE_SUPPORT_FLAG_DYNAMIC_FRONT_FACE_BIT;
             }
-            if (context->device.api_major > 1 || context->device.api_minor > 2) {
+            if (context->device.api_major > 1 && context->device.api_minor > 2) {
                 context->device.support_flags |= VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_TOPOLOGY_BIT;
+                context->device.support_flags |= VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_DYNAMIC_FRONT_FACE_BIT;
             }
             if (smooth_line_next.smoothLines) {
                 context->device.support_flags |= VULKAN_DEVICE_SUPPORT_FLAG_LINE_SMOOTH_RASTERISATION_BIT;

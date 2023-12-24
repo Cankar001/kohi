@@ -30,6 +30,8 @@ typedef struct material_system_config {
     u32 max_material_count;
 } material_system_config;
 
+struct frame_data;
+
 /**
  * @brief Initializes the material system.
  * Should be called twice; once to get the memory requirement (passing state=0), and a second
@@ -110,7 +112,7 @@ KAPI material* material_system_get_default_terrain(void);
  * @brief Applies global-level data for the material shader id.
  *
  * @param shader_id The identifier of the shader to apply globals for.
- * @param renderer_frame_number The renderer's current frame number.
+ * @param p_frame_data A constant pointer to the current frame's data.
  * @param projection A constant pointer to a projection matrix.
  * @param view A constant pointer to a view matrix.
  * @param ambient_colour The ambient colour of the scene.
@@ -118,16 +120,17 @@ KAPI material* material_system_get_default_terrain(void);
  * @param render_mode The render mode.
  * @return True on success; otherwise false.
  */
-KAPI b8 material_system_apply_global(u32 shader_id, u64 renderer_frame_number, const mat4* projection, const mat4* view, const vec4* ambient_colour, const vec3* view_position, u32 render_mode);
+KAPI b8 material_system_apply_global(u32 shader_id, const struct frame_data* p_frame_data, const mat4* projection, const mat4* view, const vec4* ambient_colour, const vec3* view_position, u32 render_mode);
 
 /**
  * @brief Applies instance-level material data for the given material.
  *
  * @param m A pointer to the material to be applied.
+ * @param p_frame_data A pointer to the current frame's data.
  * @param needs_update Indicates if material internals require updating, or if they should just be bound.
  * @return True on success; otherwise false.
  */
-KAPI b8 material_system_apply_instance(material* m, b8 needs_update);
+KAPI b8 material_system_apply_instance(material* m, struct frame_data* p_frame_data, b8 needs_update);
 
 /**
  * @brief Applies local-level material data (typically just model matrix).

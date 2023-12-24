@@ -13,7 +13,7 @@
 
 #pragma once
 
-#include "renderer/renderer_types.inl"
+#include "renderer/renderer_types.h"
 #include "resources/resource_types.h"
 #include "vulkan_renderer_plugin_main.h"
 
@@ -24,12 +24,16 @@ struct frame_data;
 b8 vulkan_renderer_backend_initialize(renderer_plugin* backend, const renderer_backend_config* config, u8* out_window_render_target_count);
 void vulkan_renderer_backend_shutdown(renderer_plugin* backend);
 void vulkan_renderer_backend_on_resized(renderer_plugin* backend, u16 width, u16 height);
-b8 vulkan_renderer_backend_frame_begin(renderer_plugin* backend, const struct frame_data* p_frame_data);
-b8 vulkan_renderer_backend_frame_end(renderer_plugin* backend, const struct frame_data* p_frame_data);
+b8 vulkan_renderer_frame_prepare(renderer_plugin* backend, struct frame_data* p_frame_data);
+b8 vulkan_renderer_begin(renderer_plugin* plugin, struct frame_data* p_frame_data);
+b8 vulkan_renderer_end(renderer_plugin* plugin, struct frame_data* p_frame_data);
+b8 vulkan_renderer_present(renderer_plugin* backend, struct frame_data* p_frame_data);
 void vulkan_renderer_viewport_set(renderer_plugin* backend, vec4 rect);
 void vulkan_renderer_viewport_reset(renderer_plugin* backend);
 void vulkan_renderer_scissor_set(renderer_plugin* backend, vec4 rect);
 void vulkan_renderer_scissor_reset(renderer_plugin* backend);
+
+void vulkan_renderer_winding_set(struct renderer_plugin* plugin, renderer_winding winding);
 b8 vulkan_renderer_renderpass_begin(renderer_plugin* backend, renderpass* pass, render_target* target);
 b8 vulkan_renderer_renderpass_end(renderer_plugin* backend, renderpass* pass);
 
@@ -40,11 +44,6 @@ void vulkan_renderer_texture_resize(renderer_plugin* backend, texture* t, u32 ne
 void vulkan_renderer_texture_write_data(renderer_plugin* backend, texture* t, u32 offset, u32 size, const u8* pixels);
 void vulkan_renderer_texture_read_data(renderer_plugin* backend, texture* t, u32 offset, u32 size, void** out_memory);
 void vulkan_renderer_texture_read_pixel(renderer_plugin* backend, texture* t, u32 x, u32 y, u8** out_rgba);
-b8 vulkan_renderer_geometry_create(renderer_plugin* backend, geometry* g);
-b8 vulkan_renderer_geometry_upload(renderer_plugin* backend, geometry* g, u32 vertex_offset, u32 vertex_size, u32 index_offset, u32 index_range);
-void vulkan_renderer_geometry_vertex_update(renderer_plugin* plugin, geometry* g, u32 offset, u32 vertex_count, void* vertices);
-void vulkan_renderer_geometry_destroy(renderer_plugin* backend, geometry* g);
-void vulkan_renderer_geometry_draw(renderer_plugin* backend, geometry_render_data* data);
 
 b8 vulkan_renderer_shader_create(renderer_plugin* backend, struct shader* shader, const shader_config* config, renderpass* pass, u8 stage_count, const char** stage_filenames, shader_stage* stages);
 void vulkan_renderer_shader_destroy(renderer_plugin* backend, struct shader* shader);
@@ -61,6 +60,7 @@ b8 vulkan_renderer_uniform_set(renderer_plugin* backend, struct shader* frontend
 
 b8 vulkan_renderer_texture_map_resources_acquire(renderer_plugin* backend, texture_map* map);
 void vulkan_renderer_texture_map_resources_release(renderer_plugin* backend, texture_map* map);
+b8 vulkan_renderer_texture_map_resources_refresh(renderer_plugin* plugin, texture_map* map);
 
 b8 vulkan_renderpass_create(renderer_plugin* backend, const renderpass_config* config, renderpass* out_renderpass);
 void vulkan_renderpass_destroy(renderer_plugin* backend, renderpass* pass);

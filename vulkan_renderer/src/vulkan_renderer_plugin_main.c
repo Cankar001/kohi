@@ -7,12 +7,15 @@
 b8 plugin_create(renderer_plugin* out_plugin) {
     out_plugin->initialize = vulkan_renderer_backend_initialize;
     out_plugin->shutdown = vulkan_renderer_backend_shutdown;
-    out_plugin->frame_begin = vulkan_renderer_backend_frame_begin;
-    out_plugin->frame_end = vulkan_renderer_backend_frame_end;
+    out_plugin->frame_prepare = vulkan_renderer_frame_prepare;
+    out_plugin->begin = vulkan_renderer_begin;
+    out_plugin->end = vulkan_renderer_end;
+    out_plugin->present = vulkan_renderer_present;
     out_plugin->viewport_set = vulkan_renderer_viewport_set;
     out_plugin->viewport_reset = vulkan_renderer_viewport_reset;
     out_plugin->scissor_set = vulkan_renderer_scissor_set;
     out_plugin->scissor_reset = vulkan_renderer_scissor_reset;
+    out_plugin->winding_set = vulkan_renderer_winding_set;
     out_plugin->renderpass_begin = vulkan_renderer_renderpass_begin;
     out_plugin->renderpass_end = vulkan_renderer_renderpass_end;
     out_plugin->resized = vulkan_renderer_backend_on_resized;
@@ -23,12 +26,6 @@ b8 plugin_create(renderer_plugin* out_plugin) {
     out_plugin->texture_write_data = vulkan_renderer_texture_write_data;
     out_plugin->texture_read_data = vulkan_renderer_texture_read_data;
     out_plugin->texture_read_pixel = vulkan_renderer_texture_read_pixel;
-
-    out_plugin->geometry_create = vulkan_renderer_geometry_create;
-    out_plugin->geometry_upload = vulkan_renderer_geometry_upload;
-    out_plugin->geometry_vertex_update = vulkan_renderer_geometry_vertex_update;
-    out_plugin->geometry_destroy = vulkan_renderer_geometry_destroy;
-    out_plugin->geometry_draw = vulkan_renderer_geometry_draw;
 
     out_plugin->shader_create = vulkan_renderer_shader_create;
     out_plugin->shader_destroy = vulkan_renderer_shader_destroy;

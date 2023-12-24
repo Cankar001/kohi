@@ -7,13 +7,15 @@
 #include "core/kvar.h"
 #include "core/logger.h"
 #include "core/systems_manager.h"
+#include "defines.h"
 #include "math/kmath.h"
+#include "math/math_types.h"
 #include "platform/platform.h"
-#include "renderer/renderer_types.inl"
+#include "renderer/renderer_types.h"
+#include "renderer/viewport.h"
 #include "resources/resource_types.h"
 #include "systems/camera_system.h"
 #include "systems/material_system.h"
-#include "systems/render_view_system.h"
 #include "systems/resource_system.h"
 #include "systems/shader_system.h"
 #include "systems/texture_system.h"
@@ -27,11 +29,11 @@ typedef struct renderer_system_state {
     // The current window framebuffer height.
     u32 framebuffer_height;
 
-    // Indicates if the window is currently being resized.
-    b8 resizing;
-    // The current number of frames since the last resize operation.'
-    // Only set if resizing = true. Otherwise 0.
-    u8 frames_since_resize;
+    viewport* active_viewport;
+    /** @brief The object vertex buffer, used to hold geometry vertices. */
+    renderbuffer geometry_vertex_buffer;
+    /** @brief The object index buffer, used to hold geometry indices. */
+    renderbuffer geometry_index_buffer;
 } renderer_system_state;
 
 b8 renderer_system_initialize(u64* memory_requirement, void* state, void* config) {
@@ -45,8 +47,6 @@ b8 renderer_system_initialize(u64* memory_requirement, void* state, void* config
     // Default framebuffer size. Overridden when window is created.
     state_ptr->framebuffer_width = 1280;
     state_ptr->framebuffer_height = 720;
-    state_ptr->resizing = false;
-    state_ptr->frames_since_resize = 0;
     state_ptr->plugin = typed_config->plugin;
 
     // TODO: make this configurable.
@@ -67,12 +67,41 @@ b8 renderer_system_initialize(u64* memory_requirement, void* state, void* config
         return false;
     }
 
+    // Geometry vertex buffer
+    // TODO: make this configurable.
+    char bufname[256];
+    kzero_memory(bufname, 256);
+    string_format(bufname, "renderbuffer_vertexbuffer_globalgeometry");
+    const u64 vertex_buffer_size = sizeof(vertex_3d) * 20 * 1024 * 1024;
+    if (!renderer_renderbuffer_create(bufname, RENDERBUFFER_TYPE_VERTEX, vertex_buffer_size, RENDERBUFFER_TRACK_TYPE_FREELIST, &state_ptr->geometry_vertex_buffer)) {
+        KERROR("Error creating vertex buffer.");
+        return false;
+    }
+    renderer_renderbuffer_bind(&state_ptr->geometry_vertex_buffer, 0);
+
+    // Geometry index buffer
+    // TODO: Make this configurable.
+    kzero_memory(bufname, 256);
+    string_format(bufname, "renderbuffer_indexbuffer_globalgeometry");
+    const u64 index_buffer_size = sizeof(u32) * 100 * 1024 * 1024;
+    if (!renderer_renderbuffer_create(bufname, RENDERBUFFER_TYPE_INDEX, index_buffer_size, RENDERBUFFER_TRACK_TYPE_FREELIST, &state_ptr->geometry_index_buffer)) {
+        KERROR("Error creating index buffer.");
+        return false;
+    }
+    renderer_renderbuffer_bind(&state_ptr->geometry_index_buffer, 0);
+
     return true;
 }
 
 void renderer_system_shutdown(void* state) {
     if (state) {
         renderer_system_state* typed_state = (renderer_system_state*)state;
+
+        // Destroy buffers.
+        renderer_renderbuffer_destroy(&typed_state->geometry_vertex_buffer);
+        renderer_renderbuffer_destroy(&typed_state->geometry_index_buffer);
+
+        // Shutdown the plugin
         typed_state->plugin.shutdown(&typed_state->plugin);
     }
 }
@@ -80,68 +109,62 @@ void renderer_system_shutdown(void* state) {
 void renderer_on_resized(u16 width, u16 height) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
     if (state_ptr) {
-        // Flag as resizing and store the change, but wait to regenerate.
-        state_ptr->resizing = true;
         state_ptr->framebuffer_width = width;
         state_ptr->framebuffer_height = height;
-        // Also reset the frame count since the last  resize operation.
-        state_ptr->frames_since_resize = 0;
+
+        state_ptr->plugin.resized(&state_ptr->plugin, width, height);
     } else {
         KWARN("renderer backend does not exist to accept resize: %i %i", width, height);
     }
 }
 
-b8 renderer_draw_frame(render_packet* packet, const struct frame_data* p_frame_data) {
+b8 renderer_frame_prepare(struct frame_data* p_frame_data) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
+
+    // Increment the frame number.
     state_ptr->plugin.frame_number++;
 
-    // Make sure the window is not currently being resized by waiting a designated
-    // number of frames after the last resize operation before performing the backend updates.
-    if (state_ptr->resizing) {
-        state_ptr->frames_since_resize++;
+    // Reset the draw index for this frame.
+    state_ptr->plugin.draw_index = 0;
 
-        // If the required number of frames have passed since the resize, go ahead and perform the actual updates.
-        if (state_ptr->frames_since_resize >= 30) {
-            f32 width = state_ptr->framebuffer_width;
-            f32 height = state_ptr->framebuffer_height;
-            render_view_system_on_window_resize(width, height);
-            state_ptr->plugin.resized(&state_ptr->plugin, width, height);
+    b8 result = state_ptr->plugin.frame_prepare(&state_ptr->plugin, p_frame_data);
 
-            // Notify views of the resize.
-            render_view_system_on_window_resize(width, height);
+    // Update the frame data with renderer info.
+    u8 attachment_index = state_ptr->plugin.window_attachment_index_get(&state_ptr->plugin);
+    p_frame_data->renderer_frame_number = state_ptr->plugin.frame_number;
+    p_frame_data->draw_index = state_ptr->plugin.draw_index;
+    p_frame_data->render_target_index = attachment_index;
 
-            state_ptr->frames_since_resize = 0;
-            state_ptr->resizing = false;
-        } else {
-            // Skip rendering the frame and try again next time.
-            // NOTE: Simulate a frame being "drawn" at 60 FPS.
-            platform_sleep(16);
-            return true;
-        }
+    return result;
+}
+
+b8 renderer_begin(struct frame_data* p_frame_data) {
+    renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
+    return state_ptr->plugin.begin(&state_ptr->plugin, p_frame_data);
+}
+
+b8 renderer_end(struct frame_data* p_frame_data) {
+    renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
+    b8 result = state_ptr->plugin.end(&state_ptr->plugin, p_frame_data);
+    // Increment the draw index for this frame.
+    state_ptr->plugin.draw_index++;
+    // Sync the frame data to it.
+    p_frame_data->draw_index = state_ptr->plugin.draw_index;
+
+    return result;
+}
+
+b8 renderer_present(struct frame_data* p_frame_data) {
+    renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
+
+    // End the frame. If this fails, it is likely unrecoverable.
+    b8 result = state_ptr->plugin.present(&state_ptr->plugin, p_frame_data);
+
+    if (!result) {
+        KERROR("renderer_present failed. Application shutting down...");
     }
 
-    // If the begin frame returned successfully, mid-frame operations may continue.
-    if (state_ptr->plugin.frame_begin(&state_ptr->plugin, p_frame_data)) {
-        u8 attachment_index = state_ptr->plugin.window_attachment_index_get(&state_ptr->plugin);
-
-        // Render each view.
-        for (u32 i = 0; i < packet->view_count; ++i) {
-            if (!render_view_system_on_render(packet->views[i].view, &packet->views[i], state_ptr->plugin.frame_number, attachment_index, p_frame_data)) {
-                KERROR("Error rendering view index %i.", i);
-                return false;
-            }
-        }
-
-        // End the frame. If this fails, it is likely unrecoverable.
-        b8 result = state_ptr->plugin.frame_end(&state_ptr->plugin, p_frame_data);
-
-        if (!result) {
-            KERROR("renderer_end_frame failed. Application shutting down...");
-            return false;
-        }
-    }
-
-    return true;
+    return result;
 }
 
 void renderer_viewport_set(vec4 rect) {
@@ -162,6 +185,11 @@ void renderer_scissor_set(vec4 rect) {
 void renderer_scissor_reset(void) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
     state_ptr->plugin.scissor_reset(&state_ptr->plugin);
+}
+
+void renderer_winding_set(renderer_winding winding) {
+    renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
+    state_ptr->plugin.winding_set(&state_ptr->plugin, winding);
 }
 
 void renderer_texture_create(const u8* pixels, struct texture* texture) {
@@ -213,13 +241,13 @@ b8 renderer_geometry_create(geometry* g, u32 vertex_size, u32 vertex_count, cons
 
     // Invalidate IDs. NOTE: Don't invalidate g->id! It should have a valid id at this point,
     // and invalidating it wreaks havoc.
-    g->internal_id = INVALID_ID;
     g->generation = INVALID_ID_U16;
 
     // Take a copy of the vertex data.
     g->vertex_count = vertex_count;
     g->vertex_element_size = vertex_size;
     g->vertices = kallocate(vertex_size * vertex_count, MEMORY_TAG_RENDERER);
+    g->vertex_buffer_offset = INVALID_ID_U64;
     kcopy_memory(g->vertices, vertices, vertex_size * vertex_count);
 
     g->index_count = index_count;
@@ -230,9 +258,9 @@ b8 renderer_geometry_create(geometry* g, u32 vertex_size, u32 vertex_count, cons
         g->indices = kallocate(index_size * index_count, MEMORY_TAG_RENDERER);
         kcopy_memory(g->indices, indices, index_size * index_count);
     }
+    g->index_buffer_offset = INVALID_ID_U64;
 
-    renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
-    return state_ptr->plugin.geometry_create(&state_ptr->plugin, g);
+    return true;
 }
 
 b8 renderer_geometry_upload(geometry* g) {
@@ -241,22 +269,103 @@ b8 renderer_geometry_upload(geometry* g) {
         return false;
     }
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
-    return state_ptr->plugin.geometry_upload(&state_ptr->plugin, g, 0, g->vertex_element_size * g->vertex_count, 0, g->index_element_size * g->index_count);
+
+    b8 is_reupload = g->generation != INVALID_ID_U16;
+    u32 vertex_size = g->vertex_element_size * g->vertex_count;
+    u32 vertex_offset = 0;
+    u32 index_size = g->index_element_size * g->index_count;
+    u32 index_offset = 0;
+    // Vertex data.
+    if (!is_reupload) {
+        // Allocate space in the buffer.
+        if (!renderer_renderbuffer_allocate(&state_ptr->geometry_vertex_buffer, vertex_size, &g->vertex_buffer_offset)) {
+            KERROR("vulkan_renderer_geometry_upload failed to allocate from the vertex buffer!");
+            return false;
+        }
+    }
+
+    // Load the data.
+    if (!renderer_renderbuffer_load_range(&state_ptr->geometry_vertex_buffer, g->vertex_buffer_offset + vertex_offset, vertex_size, g->vertices + vertex_offset)) {
+        KERROR("vulkan_renderer_geometry_upload failed to upload to the vertex buffer!");
+        return false;
+    }
+
+    // Index data, if applicable
+    if (index_size) {
+        if (!is_reupload) {
+            // Allocate space in the buffer.
+            if (!renderer_renderbuffer_allocate(&state_ptr->geometry_index_buffer, index_size, &g->index_buffer_offset)) {
+                KERROR("vulkan_renderer_geometry_upload failed to allocate from the index buffer!");
+                return false;
+            }
+        }
+
+        // Load the data.
+        if (!renderer_renderbuffer_load_range(&state_ptr->geometry_index_buffer, g->index_buffer_offset + index_offset, index_size, g->indices + index_offset)) {
+            KERROR("vulkan_renderer_geometry_upload failed to upload to the index buffer!");
+            return false;
+        }
+    }
+
+    g->generation++;
+
+    return true;
 }
 
 void renderer_geometry_vertex_update(geometry* g, u32 offset, u32 vertex_count, void* vertices) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
-    state_ptr->plugin.geometry_vertex_update(&state_ptr->plugin, g, offset, vertex_count, vertices);
+    // Load the data.
+    u32 size = g->vertex_element_size * vertex_count;
+    if (!renderer_renderbuffer_load_range(&state_ptr->geometry_vertex_buffer, g->vertex_buffer_offset + offset, size, vertices + offset)) {
+        KERROR("vulkan_renderer_geometry_vertex_update failed to upload to the vertex buffer!");
+    }
 }
 
-void renderer_geometry_destroy(geometry* geometry) {
+void renderer_geometry_destroy(geometry* g) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
-    state_ptr->plugin.geometry_destroy(&state_ptr->plugin, geometry);
+
+    if (g->generation != INVALID_ID_U16) {
+        // Free vertex data
+        u64 vertex_data_size = g->vertex_element_size * g->vertex_count;
+        if (vertex_data_size) {
+            if (!renderer_renderbuffer_free(&state_ptr->geometry_vertex_buffer, vertex_data_size, g->vertex_buffer_offset)) {
+                KERROR("vulkan_renderer_destroy_geometry failed to free vertex buffer range.");
+            }
+        }
+
+        // Free index data, if applicable
+        u64 index_data_size = g->index_element_size * g->index_count;
+        if (index_data_size) {
+            if (!renderer_renderbuffer_free(&state_ptr->geometry_index_buffer, index_data_size, g->index_buffer_offset)) {
+                KERROR("vulkan_renderer_destroy_geometry failed to free index buffer range.");
+            }
+        }
+
+        g->generation = INVALID_ID_U16;
+    }
+
+    if (g->vertices) {
+        kfree(g->vertices, g->vertex_element_size * g->vertex_count, MEMORY_TAG_RENDERER);
+    }
+    if (g->indices) {
+        kfree(g->indices, g->index_element_size * g->index_count, MEMORY_TAG_RENDERER);
+    }
 }
 
 void renderer_geometry_draw(geometry_render_data* data) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
-    state_ptr->plugin.geometry_draw(&state_ptr->plugin, data);
+    b8 includes_index_data = data->geometry->index_count > 0;
+    if (!renderer_renderbuffer_draw(&state_ptr->geometry_vertex_buffer, data->geometry->vertex_buffer_offset, data->geometry->vertex_count, includes_index_data)) {
+        KERROR("vulkan_renderer_draw_geometry failed to draw vertex buffer;");
+        return;
+    }
+
+    if (includes_index_data) {
+        if (!renderer_renderbuffer_draw(&state_ptr->geometry_index_buffer, data->geometry->index_buffer_offset, data->geometry->index_count, !includes_index_data)) {
+            KERROR("vulkan_renderer_draw_geometry failed to draw index buffer;");
+            return;
+        }
+    }
 }
 
 b8 renderer_renderpass_begin(renderpass* pass, render_target* target) {
@@ -384,7 +493,6 @@ b8 renderer_renderpass_create(const renderpass_config* config, renderpass* out_r
     out_renderpass->targets = kallocate(sizeof(render_target) * out_renderpass->render_target_count, MEMORY_TAG_ARRAY);
     out_renderpass->clear_flags = config->clear_flags;
     out_renderpass->clear_colour = config->clear_colour;
-    out_renderpass->render_area = config->render_area;
     out_renderpass->name = string_duplicate(config->name);
 
     // Copy over config for each target.
@@ -439,7 +547,7 @@ void renderer_flag_enabled_set(renderer_config_flags flag, b8 enabled) {
     state_ptr->plugin.flag_enabled_set(&state_ptr->plugin, flag, enabled);
 }
 
-b8 renderer_renderbuffer_create(const char* name, renderbuffer_type type, u64 total_size, b8 use_freelist, renderbuffer* out_buffer) {
+b8 renderer_renderbuffer_create(const char* name, renderbuffer_type type, u64 total_size, renderbuffer_track_type track_type, renderbuffer* out_buffer) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
     if (!out_buffer) {
         KERROR("renderer_renderbuffer_create requires a valid pointer to hold the created buffer.");
@@ -458,11 +566,15 @@ b8 renderer_renderbuffer_create(const char* name, renderbuffer_type type, u64 to
         out_buffer->name = string_duplicate(temp_name);
     }
 
+    out_buffer->track_type = track_type;
+
     // Create the freelist, if needed.
-    if (use_freelist) {
+    if (track_type == RENDERBUFFER_TRACK_TYPE_FREELIST) {
         freelist_create(total_size, &out_buffer->freelist_memory_requirement, 0, 0);
         out_buffer->freelist_block = kallocate(out_buffer->freelist_memory_requirement, MEMORY_TAG_RENDERER);
         freelist_create(total_size, &out_buffer->freelist_memory_requirement, out_buffer->freelist_block, &out_buffer->buffer_freelist);
+    } else if (track_type == RENDERBUFFER_TRACK_TYPE_LINEAR) {
+        out_buffer->offset = 0;
     }
 
     // Create the internal buffer from the backend.
@@ -477,10 +589,12 @@ b8 renderer_renderbuffer_create(const char* name, renderbuffer_type type, u64 to
 void renderer_renderbuffer_destroy(renderbuffer* buffer) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
     if (buffer) {
-        if (buffer->freelist_memory_requirement > 0) {
+        if (buffer->track_type == RENDERBUFFER_TRACK_TYPE_FREELIST) {
             freelist_destroy(&buffer->buffer_freelist);
             kfree(buffer->freelist_block, buffer->freelist_memory_requirement, MEMORY_TAG_RENDERER);
             buffer->freelist_memory_requirement = 0;
+        } else if (buffer->track_type == RENDERBUFFER_TRACK_TYPE_LINEAR) {
+            buffer->offset = 0;
         }
 
         if (buffer->name) {
@@ -538,7 +652,7 @@ b8 renderer_renderbuffer_resize(renderbuffer* buffer, u64 new_total_size) {
         return false;
     }
 
-    if (buffer->freelist_memory_requirement > 0) {
+    if (buffer->track_type == RENDERBUFFER_TRACK_TYPE_FREELIST) {
         // Resize the freelist first, if used.
         u64 new_memory_requirement = 0;
         freelist_resize(&buffer->buffer_freelist, &new_memory_requirement, 0, 0, 0);
@@ -567,13 +681,17 @@ b8 renderer_renderbuffer_resize(renderbuffer* buffer, u64 new_total_size) {
 
 b8 renderer_renderbuffer_allocate(renderbuffer* buffer, u64 size, u64* out_offset) {
     if (!buffer || !size || !out_offset) {
-        KERROR("vulkan_buffer_allocate requires valid buffer, a nonzero size and valid pointer to hold offset.");
+        KERROR("renderer_renderbuffer_allocate requires valid buffer, a nonzero size and valid pointer to hold offset.");
         return false;
     }
 
-    if (buffer->freelist_memory_requirement == 0) {
-        KWARN("vulkan_buffer_allocate called on a buffer not using freelists. Offset will not be valid. Call renderer_renderbuffer_load_range instead.");
+    if (buffer->track_type == RENDERBUFFER_TRACK_TYPE_NONE) {
+        KWARN("renderer_renderbuffer_allocate called on a buffer not using freelists. Offset will not be valid. Call renderer_renderbuffer_load_range instead.");
         *out_offset = 0;
+        return true;
+    } else if (buffer->track_type == RENDERBUFFER_TRACK_TYPE_LINEAR) {
+        *out_offset = buffer->offset;
+        buffer->offset += size;
         return true;
     }
     return freelist_allocate_block(&buffer->buffer_freelist, size, out_offset);
@@ -581,15 +699,36 @@ b8 renderer_renderbuffer_allocate(renderbuffer* buffer, u64 size, u64* out_offse
 
 b8 renderer_renderbuffer_free(renderbuffer* buffer, u64 size, u64 offset) {
     if (!buffer || !size) {
-        KERROR("vulkan_buffer_free requires valid buffer and a nonzero size.");
+        KERROR("renderer_renderbuffer_free requires valid buffer and a nonzero size.");
         return false;
     }
 
-    if (buffer->freelist_memory_requirement == 0) {
-        KWARN("vulkan_buffer_allocate called on a buffer not using freelists. Nothing was done.");
+    if (buffer->track_type != RENDERBUFFER_TRACK_TYPE_FREELIST) {
+        KWARN("renderer_render_buffer_free called on a buffer not using freelists. Nothing was done.");
         return true;
     }
     return freelist_free_block(&buffer->buffer_freelist, size, offset);
+}
+
+b8 renderer_renderbuffer_clear(renderbuffer* buffer, b8 zero_memory) {
+    if (!buffer) {
+        KERROR("renderer_renderbuffer_clear requires valid buffer and a nonzero size.");
+        return false;
+    }
+
+    if (buffer->track_type == RENDERBUFFER_TRACK_TYPE_FREELIST) {
+        freelist_clear(&buffer->buffer_freelist);
+    } else if (buffer->track_type == RENDERBUFFER_TRACK_TYPE_LINEAR) {
+        buffer->offset = 0;
+    }
+
+    if (zero_memory) {
+        // TODO: zero memory
+        KFATAL("TODO: Zero memory");
+        return false;
+    }
+
+    return true;
 }
 
 b8 renderer_renderbuffer_load_range(renderbuffer* buffer, u64 offset, u64 size, const void* data) {
@@ -605,4 +744,21 @@ b8 renderer_renderbuffer_copy_range(renderbuffer* source, u64 source_offset, ren
 b8 renderer_renderbuffer_draw(renderbuffer* buffer, u64 offset, u32 element_count, b8 bind_only) {
     renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
     return state_ptr->plugin.renderbuffer_draw(&state_ptr->plugin, buffer, offset, element_count, bind_only);
+}
+
+void renderer_active_viewport_set(viewport* v) {
+    renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
+    state_ptr->active_viewport = v;
+
+    // rect_2d viewport_rect = (vec4){v->rect.x, v->rect.height - v->rect.y, v->rect.width, -v->rect.height};
+    rect_2d viewport_rect = (vec4){v->rect.x, v->rect.y + v->rect.height, v->rect.width, -v->rect.height};
+    state_ptr->plugin.viewport_set(&state_ptr->plugin, viewport_rect);
+
+    rect_2d scissor_rect = (vec4){v->rect.x, v->rect.y, v->rect.width, v->rect.height};
+    state_ptr->plugin.scissor_set(&state_ptr->plugin, scissor_rect);
+}
+
+viewport* renderer_active_viewport_get() {
+    renderer_system_state* state_ptr = (renderer_system_state*)systems_manager_get_state(K_SYSTEM_TYPE_RENDERER);
+    return state_ptr->active_viewport;
 }
